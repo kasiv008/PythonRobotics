@@ -44,7 +44,7 @@ class Dijkstra:
         self.unvisited = []
         heapq.heappush(self.unvisited, (0, tuple(self.start)))
 
-    def find_path(self):
+    def find_path(self,alpha,beta):
         while self.unvisited:
             current_dist, current_node = heapq.heappop(self.unvisited)
             x, y = current_node
@@ -65,7 +65,7 @@ class Dijkstra:
 
             for nx, ny in self.get_neighbours(x, y):
                 if not self.grid[nx, ny].visited:
-                    tentative_dist = self.grid[x, y].dist + self.grid[nx, ny].value
+                    tentative_dist = alpha*self.grid[x, y].dist + beta*self.grid[nx, ny].value ## value that is being optimized
                     if tentative_dist < self.grid[nx, ny].dist:
                         self.grid[nx, ny].dist = tentative_dist
                         self.grid[nx, ny].backtrack = (x, y)
@@ -166,14 +166,16 @@ class StateLatticeOptimizer:
         return best_trajectory if best_trajectory else [start_world, goal_world]
 
 class DynamicHybridPlanner:
-    def __init__(self, costmap, resolution=3):
+    def __init__(self, costmap, resolution=3, alpha=1.0, beta=1.0):
         self.costmap = costmap
         self.resolution = resolution
         self.state_lattice = StateLatticeOptimizer(costmap, resolution)
-        
+
         # Vehicle parameters
         self.vehicle_speed = 2.0  # grid units per step
         self.optimization_lookahead = 25  # Only optimize next 25 waypoints
+        self.alpha = alpha
+        self.beta = beta
         
         # Current global path
         self.global_dijkstra_path = None
@@ -201,7 +203,7 @@ class DynamicHybridPlanner:
             # Plan complete path with Dijkstra to final goal
             grid = Grid(self.costmap, current_pos)
             dijkstra_solver = Dijkstra(grid, current_pos, final_goal)
-            dijkstra_solver.find_path()
+            dijkstra_solver.find_path(self.alpha,self.beta)
             dijkstra_path = dijkstra_solver.backtrack_path()
             
             if not dijkstra_path or len(dijkstra_path) < 2:
@@ -547,13 +549,85 @@ class DynamicPathVisualizer:
         
         return anim
 
+def compare_dijkstra_paths(costmap, start, goal):
+    """Compare Dijkstra paths with different alpha/beta values and let user choose"""
+    print("=== COMPARING DIJKSTRA PATHS WITH DIFFERENT PARAMETERS ===")
+    
+    # Parameter sets to test
+    param_sets = [
+        {"alpha": 1.0, "beta": 1.0, "label": "Balanced (α=1.0, β=1.0)", "color": "blue"},
+        {"alpha": 1.01, "beta": 0.99, "label": "Distance Preferred (α=1.01, β=0.99)", "color": "green"},
+        {"alpha": 0.9, "beta": 1.1, "label": "Costmap Preferred (α=0.9, β=1.1)", "color": "red"},
+        {"alpha": 0.8, "beta": 1.2, "label": "Costmap Preferred (α=0.8, β=1.2)", "color": "pink"}
+    ]
+    
+    # Create figure for visualization
+    fig, ax = plt.subplots(figsize=(16, 12))
+    ax.imshow(costmap, cmap='Blues', alpha=0.6, origin='upper')
+    
+    # Plot start and goal
+    ax.plot(start[1], start[0], 'go', markersize=12, label='Start', markeredgecolor='darkgreen', markeredgewidth=2)
+    ax.plot(goal[1], goal[0], 'ro', markersize=12, label='Goal', markeredgecolor='darkred', markeredgewidth=2)
+    
+    paths = []
+    
+    # Run Dijkstra for each parameter set
+    for param_set in param_sets:
+        print(f"Planning path with α={param_set['alpha']}, β={param_set['beta']}...")
+        
+        # Create grid and run Dijkstra
+        grid = Grid(costmap, start)
+        dijkstra_solver = Dijkstra(grid, start, goal)
+        dijkstra_solver.find_path(param_set['alpha'], param_set['beta'])
+        path = dijkstra_solver.backtrack_path()
+        
+        paths.append({
+            "params": param_set,
+            "path": path
+        })
+        
+        # Plot this path if valid
+        if path and len(path) > 1:
+            path_array = np.array(path)
+            ax.plot(path_array[:, 1], path_array[:, 0], 
+                   color=param_set['color'], linewidth=3, alpha=0.8,
+                   label=param_set['label'], marker='o', markersize=4)
+    
+    # Add legend and title
+    ax.legend(loc='upper right', fontsize=12)
+    ax.set_title('Comparison of Dijkstra Paths with Different Parameters', fontsize=16, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Show the plot
+    plt.tight_layout()
+    plt.savefig('dijkstra_comparison.png')  # Save for reference
+    plt.show()
+    
+    # Ask user to select a path
+    while True:
+        print("\nSelect a path to use for dynamic planning:")
+        print("1: Balanced (α=1.0, β=1.0)")
+        print("2: Distance Preferred (α=1.2, β=0.8)")
+        print("3: Costmap Preferred (α=0.8, β=1.2)")
+        
+        try:
+            choice = int(input("Enter your choice (1-4): "))
+            if 1 <= choice <= 4:
+                selected_params = param_sets[choice-1]
+                print(f"\nYou selected: {selected_params['label']}")
+                return selected_params['alpha'], selected_params['beta']
+            else:
+                print("Invalid choice. Please enter a number between 1 and 4.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
 def main():
-    print("=== DYNAMIC HYBRID PATH PLANNING: ZOOMED VIEW ===")
+    print("=== DYNAMIC HYBRID PATH PLANNING WITH USER PATH SELECTION ===")
     
     # Load costmap
     print("Loading costmap...")
     try:
-        grid_data = np.load('/home/level5_kasi/Downloads/cavasos_costmap_final.npy', allow_pickle=True)
+        grid_data = np.load('/home/kasi/Desktop/PythonRobotics/PathPlanning/StateLatticePlanner/cavasos_costmap_final.npy', allow_pickle=True)
     except FileNotFoundError:
         print("Costmap file not found! Creating a simple test costmap...")
         grid_data = np.ones((600, 600)) * 10
@@ -561,8 +635,8 @@ def main():
         grid_data[300:320, 100:500] = 100
     
     # Define start and goal
-    start = [1300, 300]
-    goal = [1048, 1122]
+    start = [1211,281]
+    goal = [1258, 1657]
     # Ensure start and goal are within bounds
     start[0] = max(0, min(start[0], grid_data.shape[0] - 1))
     start[1] = max(0, min(start[1], grid_data.shape[1] - 1))
@@ -571,12 +645,16 @@ def main():
     
     print(f"Costmap shape: {grid_data.shape}")
     print(f"Planning from {start} to {goal}")
-    print(f"Creating zoomed view that follows the robot")
     
-    # Create dynamic planner
-    planner = DynamicHybridPlanner(grid_data, resolution=3)
+    # Compare paths and get user selection
+    alpha, beta = compare_dijkstra_paths(grid_data, start, goal)
+    
+    # Create dynamic planner with selected parameters
+    print(f"\nCreating dynamic planner with α={alpha}, β={beta}")
+    planner = DynamicHybridPlanner(grid_data, resolution=3, alpha=alpha, beta=beta)
     
     # Create zoomed visualizer
+    print(f"Creating zoomed view that follows the robot")
     visualizer = DynamicPathVisualizer(grid_data, start, goal, planner, zoom_radius=75)
     
     # Run simulation
@@ -585,7 +663,7 @@ def main():
     # Create animation
     if len(visualizer.frames_data) > 0:
         animation_obj = visualizer.create_animation(
-            filename='zoomed_state_lattice_robot_following.gif', 
+            filename=f'zoomed_planning_alpha{alpha}_beta{beta}.gif', 
             fps=12
         )
         
